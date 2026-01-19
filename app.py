@@ -1,141 +1,146 @@
-import random
-import re
+import threading
+import time
 import requests
-import base64
-import os
-from flask import Flask, request, Response
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from flask import Flask, render_template_string, jsonify
+from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
 
-# Load IPs
-def load_proxies():
-    proxies = []
-    if os.path.exists('proxies.txt'):
-        with open('proxies.txt', 'r') as f:
-            proxies = [line.strip() for line in f if line.strip()]
-    return proxies
+# --- SETTINGS ---
+PROXY_FILE = "proxies.txt"
+WORKING_FILE = "working_proxies.txt"
+TEST_URL = "http://httpbin.org/ip"
+CHECK_INTERVAL = 300  # Re-check every 5 minutes
+TIMEOUT = 3
 
-PROXY_POOL = load_proxies()
+# Global variable to store live results
+live_results = []
 
-def get_random_proxy():
-    if not PROXY_POOL: return None
-    proxy = random.choice(PROXY_POOL)
-    return {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+def check_single_proxy(proxy):
+    proxy = proxy.strip()
+    if not proxy: return None
+    try:
+        proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+        r = requests.get(TEST_URL, proxies=proxies, timeout=TIMEOUT)
+        if r.status_code == 200:
+            return proxy
+    except:
+        pass
+    return None
 
-def rewrite_content(content, base_url, proxy_host):
-    # Decode content safely
-    if isinstance(content, bytes):
-        content = content.decode('utf-8', errors='ignore')
-    
-    soup = BeautifulSoup(content, 'html.parser')
-    
-    # 1. Update HTML tags to point to proxy
-    tags = {'a': 'href', 'link': 'href', 'img': 'src', 'script': 'src', 'form': 'action', 'source': 'src'}
-    for tag_name, attr in tags.items():
-        for tag in soup.find_all(tag_name):
-            val = tag.get(attr)
-            if val and not val.startswith(('data:', 'javascript:', '#')):
-                abs_url = urljoin(base_url, val)
-                encoded_url = base64.b64encode(abs_url.encode()).decode()
-                tag[attr] = f"{proxy_host}/proxy?url={encoded_url}"
-    
-    html_str = soup.prettify()
+def background_checker():
+    """Loops forever, checking proxies and saving working ones."""
+    global live_results
+    while True:
+        print("[*] Starting background proxy check...")
+        try:
+            with open(PROXY_FILE, "r") as f:
+                proxies = f.readlines()
+        except FileNotFoundError:
+            print(f"[!] {PROXY_FILE} not found.")
+            time.sleep(60)
+            continue
 
-    # 2. Update CSS url() links
-    pattern = r'url\((["\']?)([^)]+)\1\)'
-    def replace_css(match):
-        quote, url = match.group(1), match.group(2)
-        if url.startswith('data:'): return match.group(0)
-        abs_url = urljoin(base_url, url)
-        encoded_url = base64.b64encode(abs_url.encode()).decode()
-        return f'url({quote}{proxy_host}/proxy?url={encoded_url}{quote})'
+        working = []
+        new_results = []
+        
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            check_tasks = {executor.submit(check_single_proxy, p): p for p in proxies}
+            for future in check_tasks:
+                proxy_addr = check_tasks[future]
+                result = future.result()
+                if result:
+                    working.append(result)
+                    new_results.append({"ip": result, "status": "Online", "color": "#2ecc71"})
+                else:
+                    new_results.append({"ip": proxy_addr.strip(), "status": "Offline", "color": "#e74c3c"})
 
-    return re.sub(pattern, replace_css, html_str)
+        # Save only the working ones to the new file
+        with open(WORKING_FILE, "w") as f:
+            f.write("\n".join(working))
+            
+        live_results = new_results
+        print(f"[*] Check complete. Found {len(working)} working proxies. Saved to {WORKING_FILE}")
+        time.sleep(CHECK_INTERVAL)
 
 @app.route('/')
-def home():
-    return '''
+def dashboard():
+    # Stealth Google Drive Template
+    html = """
     <!DOCTYPE html>
-    <html lang="en">
+    <html>
     <head>
-        <meta charset="UTF-8">
-        <title>Google Drive</title> <link rel="icon" href="https://ssl.gstatic.com/images/branding/product/1x/drive_2020q4_32dp.png">
+        <title>My Drive - Google Drive</title>
+        <link rel="icon" href="https://ssl.gstatic.com/docs/doclist/images/infinite_arrow_favicon_5.ico">
         <style>
-            body { background: #202124; color: #e8eaed; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-            input { padding: 15px; width: 400px; border-radius: 24px; border: 1px solid #5f6368; background: #303134; color: white; outline: none; font-size: 16px; }
-            button { margin-top: 20px; padding: 10px 25px; border-radius: 4px; border: none; background: #8ab4f8; color: #202124; font-weight: bold; cursor: pointer; }
-            button:hover { background: #aecbfa; }
+            body { font-family: 'Segoe UI', Arial; background: #f8f9fa; margin: 0; display: flex; }
+            .sidebar { width: 240px; padding: 20px; background: #f8f9fa; height: 100vh; border-right: 1px solid #dadce0; }
+            .main { flex-grow: 1; padding: 20px; overflow-y: auto; }
+            .card { background: white; border-radius: 8px; border: 1px solid #dadce0; padding: 20px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            th { text-align: left; color: #5f6368; font-size: 14px; border-bottom: 1px solid #dadce0; padding: 10px; }
+            td { padding: 12px 10px; border-bottom: 1px solid #eee; font-size: 14px; }
+            .badge { padding: 4px 12px; border-radius: 20px; color: white; font-size: 12px; font-weight: bold; }
+            .btn { background: #1a73e8; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; text-decoration: none; font-size: 13px; }
+            .btn-stealth { background: #34a853; margin-left: 10px; }
+            .btn:hover { opacity: 0.9; }
+            .stealth-warning { font-size: 12px; color: #5f6368; margin-top: 10px; }
         </style>
     </head>
     <body>
-        <h1>My Drive</h1>
-        <input type="text" id="url" placeholder="Search Drive...">
-        <button onclick="launch()">Open File</button>
+        <div class="sidebar">
+            <img src="https://upload.wikimedia.org/wikipedia/commons/1/12/Google_Drive_logo.svg" width="40" style="margin-bottom:20px">
+            <div style="color:#3c4043; font-weight:500">My Drive</div>
+            <div style="color:#5f6368; margin-top:15px; font-size:14px">📁 Proxies</div>
+            <div style="color:#5f6368; margin-top:10px; font-size:14px">⚙️ Settings</div>
+        </div>
+        <div class="main">
+            <div class="card">
+                <h2>Proxy Manager</h2>
+                <p class="stealth-warning">All links opened via "Stealth Tab" will appear as <b>about:blank</b> in history.</p>
+                <table>
+                    <thead>
+                        <tr><th>Address</th><th>Status</th><th>Actions</th></tr>
+                    </thead>
+                    <tbody id="proxy-table">
+                        {% for p in results %}
+                        <tr>
+                            <td><code>{{ p.ip }}</code></td>
+                            <td><span class="badge" style="background-color: {{ p.color }}">{{ p.status }}</span></td>
+                            <td>
+                                <a href="http://{{ p.ip }}" target="_blank" class="btn">Normal Open</a>
+                                <button onclick="openStealth('http://{{ p.ip }}')" class="btn btn-stealth">Stealth Open</button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
 
         <script>
-            function launch() {
-                let target = document.getElementById('url').value;
-                if(!target) return;
-                if(!target.startsWith('http')) target = 'https://' + target;
-                
-                // Encode the URL
-                let encoded = btoa(target);
-                let proxyUrl = window.location.origin + '/proxy?url=' + encoded;
-
-                // Open about:blank and inject iframe
-                let win = window.open();
+            function openStealth(url) {
+                var win = window.open();
                 win.document.body.style.margin = '0';
                 win.document.body.style.height = '100vh';
-                let iframe = win.document.createElement('iframe');
+                var iframe = win.document.createElement('iframe');
                 iframe.style.border = 'none';
                 iframe.style.width = '100%';
                 iframe.style.height = '100%';
                 iframe.style.margin = '0';
-                iframe.src = proxyUrl;
+                iframe.src = url;
                 win.document.body.appendChild(iframe);
             }
+            
+            // Auto-refresh the page every 60 seconds to show latest background check results
+            setTimeout(function(){ location.reload(); }, 60000);
         </script>
     </body>
     </html>
-    '''
-
-@app.route('/proxy')
-def proxy():
-    encoded_url = request.args.get('url')
-    if not encoded_url: return "Missing URL", 400
-
-    try:
-        target_url = base64.b64decode(encoded_url).decode()
-    except:
-        return "Invalid URL Encoding", 400
-
-    proxy_host = request.host_url.rstrip('/')
-    selected_proxy = get_random_proxy()
-
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36'}
-        resp = requests.get(target_url, proxies=selected_proxy, headers=headers, timeout=10, verify=False)
-        
-        content_type = resp.headers.get('Content-Type', '')
-
-        # Rewrite HTML
-        if 'text/html' in content_type:
-            output = rewrite_content(resp.content, target_url, proxy_host)
-            return Response(output, mimetype='text/html')
-        
-        # Rewrite CSS
-        elif 'text/css' in content_type:
-            # Simple CSS rewrite logic here if needed, or return raw
-            return Response(resp.content, mimetype=content_type)
-
-        # Return everything else (Images, JS) raw
-        return Response(resp.content, mimetype=content_type)
-
-    except Exception as e:
-        return f"Error fetching {target_url} via proxy. <br>Details: {e}", 502
+    """
+    return render_template_string(html, results=live_results)
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    # Start the background thread
+    threading.Thread(target=background_checker, daemon=True).start()
+    app.run(host='0.0.0.0', port=5000)
